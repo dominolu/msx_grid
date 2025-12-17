@@ -56,6 +56,9 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # 安装依赖
 pip install -r requirements.txt
+
+# 安装 Playwright 所需浏览器内核（至少安装 Chromium）
+playwright install chromium
 ```
 
 > 说明：`requirements.txt` 中包含 `fastapi` 相关依赖通过框架内传递安装，请保证安装后没有缺失包。如果运行时报缺少 `fastapi` 或 `uvicorn`，手动安装：
