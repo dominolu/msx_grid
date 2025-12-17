@@ -1,6 +1,6 @@
 ## MSX 网格交易系统
 
-一个基于 **FastAPI + Playwright + Chrome DevTools** 的单策略网格交易系统，通过复用浏览器登录态直接调用交易所接口，实现 Web 端可视化配置与监控的网格策略。
+一个基于 [MSX.com RWA 平台](https://msx.com) 的网格交易系统，通过复用浏览器登录态直接调用交易所接口，实现 Web 端可视化配置与监控的网格策略。
 
 
 ### 环境准备
@@ -16,7 +16,7 @@
 本项目通过 **Chrome DevTools** 复用浏览器会话，需要：
 
 #### macOS
-- 使用自动化脚本方式启动
+- 使用自动化脚本方式启动（示例）
 ```bash
 #!/bin/bash
 open -na "/Applications/Google Chrome.app" --args \
@@ -27,16 +27,16 @@ open -na "/Applications/Google Chrome.app" --args \
 #### Windows
 - 使用快捷方式启动
   1. 在桌面右键 → **新建 → 快捷方式**
-  2. 目标填写（根据你的安装路径调整）：
+  2. 在“目标”输入框中填写（根据你的安装路径调整）：
      ```text
      "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome_data\001"
      ```
   3. 下一步，给快捷方式起一个名字（如：`msx_grid`），完成后双击该快捷方式即可。
 
 3. 在该浏览器窗口中：
-   - 打开交易网站https://msx.com
-   - 连接钱包，保证正常访问账户
-   - 进入合约交易页面（例如合约交易界面），确保页面正常加载一段时间  
+   - 打开交易网站 [https://msx.com](https://msx.com)
+   - 连接钱包，确保可以正常访问账户资产与持仓
+   - 进入合约交易页面（合约交易界面），确保页面正常加载一段时间  
 
 4. 确认 `config/config.yaml` 中的 `cdp_url` 与实际端口一致（默认是 `http://localhost:9222`）。
 
@@ -47,8 +47,9 @@ open -na "/Applications/Google Chrome.app" --args \
 建议在虚拟环境中安装。
 
 ```bash
-git clone https://
-
+# 克隆仓库并进入项目目录
+git clone https://github.com/dominolu/msx_grid.git
+cd msx_grid
 # 可选：创建虚拟环境
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
@@ -67,13 +68,13 @@ pip install -r requirements.txt
 
 ### 配置说明
 
-配置文件位于：`config/config.yaml`，示例：
+配置文件位于：`config/config.yaml`，最关键的字段如下：
 
 ```yaml
 cdp_url: http://localhost:9222
 
 ```
-- **cdp_url**：Chrome DevTools 地址，需与浏览器启动时设置的端口一致。
+- **cdp_url**：Chrome DevTools 地址，需与浏览器启动时设置的端口一致，一般保持默认即可。
 
 ---
 
@@ -114,8 +115,8 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 
    - 点击「启动策略」按钮，弹出配置对话框：
      - **市场类型**：
-       - `合约 (Contract)`：支持杠杆, 自动适配相应杠杆
-       - `现货 (Spot)`：暂时不支持
+       - `合约 (Contract)`：支持杠杆，会根据交易对的 `leverTypes` 自动限制可选杠杆区间
+       - `现货 (Spot)`：暂不支持（前端会限制为不可选）
      - **交易对**：
        - 输入或下拉选择，如 `AAPL`、`ETHUSDT` 等
        - 前端会通过 `/api/symbols?market_type=...` 获取列表并进行模糊匹配
@@ -156,31 +157,23 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-### 常见问题（FAQ）
-
-1. **`/api/status` 提示「交易所实例未初始化」？**
-   - 检查 `app.py` 是否正常启动，以及 `config/config.yaml` 是否存在并能被读取。
-   - 检查 `cdp_url` 是否正确，Chrome 是否 **已用调试端口启动**。
-
-2. **`/api/start` 返回「账户余额不足」等错误？**
-   - 确认账户内余额是否 >= 投资额（保证金）。
-   - 网格数量过多 / 价格区间过宽会导致每单金额超过或低于最小要求，适当缩小价格区间或减少网格数。
-
-3. **页面显示「未连接」？**
-   - 确保 Chrome 是通过 `--remote-debugging-port=9222` 启动的，而不是普通方式。
-   - 确认 `config.yaml` 中的 `cdp_url` 与实际端口一致。
-   - 确认已登录交易网站且浏览器里有正常的网络请求发往交易 API 域名。
-
----
+交流社区：https://t.me/+rgROLLnodxJhOWM1
 
 如本项目对你有帮助，欢迎捐赠支持（非必需）：  
 SOL 捐赠地址：`2PrHdxX8uBwqDMqySsxKp5FbK2tmE3yrqcRXaG6BwKjj`
+
+---
+
+### 开源协议
+
+本项目基于 **MIT License** 开源。  
+你可以在遵守 MIT 协议的前提下自由地使用、拷贝、修改和分发本项目代码，具体条款见仓库根目录的 `LICENSE` 文件。
+
+---
 
 ### 免责声明
 
 本项目仅用于技术研究与学习示例，不构成任何投资建议。  
 使用本项目进行实盘交易可能导致资金损失，请在完全理解代码逻辑、并自行评估风险后再使用。作者与贡献者不对任何损失负责。  
-
-
 
 
