@@ -168,7 +168,7 @@ class GridStrategy:
             # 检查缓存是否有效（当前时间未超过startTradeTime）
             if (self._trading_status_cache.get("is_trade") is not None and 
                 self._trading_status_cache.get("start_trade_time") is not None and
-                current_time < self._trading_status_cache["start_trade_time"]):
+                current_time < self._trading_status_cache["last_update_time"]):
                 return self._trading_status_cache["is_trade"]
             
             # 需要重新请求API
@@ -986,6 +986,29 @@ class GridStrategy:
             
             # 计算总资金 = 投入资金 * 杠杆倍数，并保存为实例变量
             self.total_capital = self.investment_amount * self.leverage
+
+            # ========== 初始化：根据网格参数设置杠杆倍数 ==========
+            # 仅在合约模式下设置杠杆；现货模式不需要设置
+            if self.market_type == "contract" and self.co_type is not None:
+                try:
+                    set_res = await self.exchange.set_leverage(
+                        symbol=self.symbol,
+                        leverage=int(self.leverage),
+                        co_type=int(self.co_type),
+                        margin_mode=1,  # 目前默认使用 1，对应接口中的 marginMode
+                    )
+                    if not set_res.get("ok"):
+                        log.warning(
+                            f"设置杠杆失败: symbol={self.symbol}, leverage={self.leverage}, "
+                            f"code={set_res.get('code')}, msg={set_res.get('msg')}"
+                        )
+                    else:
+                        log.info(
+                            f"杠杆设置成功: symbol={self.symbol}, leverage={self.leverage}, "
+                            f"co_type={self.co_type}"
+                        )
+                except Exception as e:
+                    log.error(f"设置杠杆异常: symbol={self.symbol}, leverage={self.leverage}, error={e}")
             
             # 资金检查：验证账户可用余额是否足够
             # 注意：对于杠杆交易，用户只需要提供保证金（投资额），而不是总资金（投资额 × 杠杆）
@@ -1053,8 +1076,7 @@ class GridStrategy:
         行为：
         1. 将运行标志 `_status` 置为 False，停止主循环；
         2. 取消当前策略相关的所有未成交挂单；
-        3. 尝试将当前持仓全部平掉（清仓），将风险降到最小；
-        4. 清理内部状态（订单引用、统计信息中的运行时间标记保留）。
+        3. 仅清理策略内部状态（订单引用、运行标记等），**不再主动平掉已有持仓**。
         """
         # 1. 标记策略已停止，主循环会在下一轮自然退出
         self._status = False
@@ -1080,48 +1102,9 @@ class GridStrategy:
                 except Exception as e:
                     log.error(f"取消挂单失败: order_id={getattr(order, 'id', 'unknown')}, error={e}")
 
-        # 3. 清仓逻辑：获取当前持仓并尝试全部平掉
-        try:
-            positions = await self.exchange.fetch_positions(self.symbol) if self.symbol else await self.exchange.fetch_positions()
-        except Exception as e:
-            log.error(f"获取持仓信息失败（停止时清仓）: {e}")
-            positions = None
-
-        if positions:
-            for pos in positions:
-                try:
-                    size = getattr(pos, "size", 0.0) or 0.0
-                    if size == 0:
-                        continue
-                    side = getattr(pos, "side", "")
-                    pos_id = getattr(pos, "id", None)
-                    # 根据方向确定平仓方向：long -> 卖出，short -> 买入
-                    close_side = "sell" if side == "long" else "buy"
-                    log.info(f"尝试平仓: symbol={getattr(pos, 'symbol', self.symbol)}, side={side}, size={size}, pos_id={pos_id}")
-
-                    await self.exchange.create_order(
-                        symbol=getattr(pos, "symbol", self.symbol),
-                        side=close_side,
-                        order_type="market",
-                        vol=size,
-                        open_type=2,  # 2 = 平仓
-                        co_type=self.co_type or 1,
-                        posId=pos_id,
-                    )
-                except Exception as e:
-                    log.error(f"平仓失败: pos_id={getattr(pos, 'id', 'unknown')}, error={e}")
-
-        # 4. 清理内部状态，避免下次启动时受到影响
+        # 3. 清理内部状态，避免下次启动时受到影响（不再主动平仓）
         self.buy_order = None
         self.sell_order = None
-        # 持仓对象本身保留，但标记为已清空（下次查询会刷新）
-        try:
-            self.position.size = 0.0
-            self.position.amount = 0.0
-        except Exception:
-            # Position 对象异常时忽略
-            pass
-
         log.info(f"网格策略已停止并完成清理: {self.symbol if self.symbol else '未设置'}")
     
     def _calculate_summary(self) -> Dict[str, Any]:

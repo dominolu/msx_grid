@@ -1,10 +1,1 @@
 cdp_url: http://localhost:9222
-
-grid_strategy:
-  symbol: ETHUSDT
-  min_price: 3000
-  max_price: 3200
-  direction: long
-  grid_spacing: 0.005
-  investment_amount: 1000
-  co_type: 3

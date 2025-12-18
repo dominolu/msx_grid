@@ -1231,7 +1231,7 @@ class MsxExchange:
         param={"PageSize": 10000, "PageIndex": 1}
         res = await self._request_api("POST", "/api/v1/co/stock/order/limit", json_body=param)
         if not res.get("ok"):
-            log.error(res)  
+         #   log.error(res)  
             return None
         data = res.get("data") or []
         if not isinstance(data, list):   
@@ -1561,7 +1561,7 @@ class MsxExchange:
                 if  code==0:
                     return {"ok": True, "status": status, "code": code, "msg": msg, "data": data,"raw":raw}
                 else:
-                    log.error(f"请求失败: {resp.status}, {await resp.text()}")
+                    log.error(f"请求失败: {resp.status}")
                     return {"ok": False, "status": status, "code": code, "msg": msg, "data": data,"raw":raw}
             except Exception as e:
                 error_msg = str(e)
@@ -1594,7 +1594,6 @@ class MsxExchange:
         
     # ----------- 直连 API 的便捷方法 -----------
     # 直连方法不再提供缓存刷新版本
- 
     async def get_config(self,symbol:str,co_type:int) -> None:
         url="api/v1/co/stock/user/config"
         if symbol in self.configs:
@@ -1607,6 +1606,56 @@ class MsxExchange:
                 return res.get("data")
             else:
                 return None
+    
+    async def set_leverage(
+        self,
+        symbol: str,
+        leverage: int,
+        co_type: int = 1,
+        margin_mode: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        设置杠杆倍数
+        
+        对应接口:
+            POST /api/v1/co/stock/user/updateLeverage
+        
+        请求示例:
+            {
+              "coType": 1,
+              "symbol": "QQQ",
+              "marginMode": 1,
+              "leverage": 5
+            }
+        
+        统一返回:
+            {"ok","code","msg","data","raw"}
+        """
+        url = "/api/v1/co/stock/user/updateLeverage"
+        payload: Dict[str, Any] = {
+            "coType": int(co_type),
+            "symbol": symbol,
+            "marginMode": int(margin_mode),
+            "leverage": int(leverage),
+        }
+        try:
+            res = await self._request_api("POST", url, json_body=payload)
+            return {
+                "ok": res.get("ok"),
+                "code": res.get("code"),
+                "msg": res.get("msg"),
+                "data": res.get("data"),
+                "raw": res.get("raw"),
+            }
+        except Exception as e:
+            log.error(f"设置杠杆失败: {e}")
+            return {
+                "ok": False,
+                "code": None,
+                "msg": str(e),
+                "data": None,
+                "raw": None,
+            }
              
     @retry(max_retries=3, delay=1)
     async def create_order(
