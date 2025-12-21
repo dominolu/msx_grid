@@ -35,6 +35,8 @@ class OrderInfo:
     amount: float = 0.0             # 订单金额（订单数量 * 订单价格）
     open_type: int = 1              # 开仓类型，1=开仓，2=平仓
     code: int = 0                   # 错误码
+    posId: Optional[int] = None     # 持仓ID（平仓订单包含此字段）
+    raw: Optional[dict] = None      # 原始订单数据（用于提取额外信息）
 
 
 @dataclass

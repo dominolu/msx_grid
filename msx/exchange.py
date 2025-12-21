@@ -433,30 +433,37 @@ class MsxExchange:
         self._page.on("websocket", on_ws)
         self._context.on("websocket", on_ws)
     
-    async def get_symbols(self, market_type: str = "contract") -> List[str]:
+    async def get_symbols(self, market_type: str = "contract", co_type: int = None) -> List[Any]:
         """
         获取交易对列表
         
         参数:
             market_type: 市场类型，"contract"（合约）或 "spot"（现货），默认 "contract"
+            co_type: 合约类型，1=股票，3=加密货币，仅合约市场有效，默认 None（使用默认值1）
         
         返回:
             交易对符号列表
         """
         if market_type == "contract":
             # 合约：直接调用合约产品列表接口获取
-            return await self._fetch_contract_symbols()
+            # 如果未指定 co_type，默认使用 1（股票）
+            co_type = co_type if co_type is not None else 1
+            return await self._fetch_contract_symbols(co_type=co_type)
         elif market_type == "spot":
             # 现货：从现货 API 获取
             return await self._fetch_spot_symbols()
         else:
             raise ValueError(f"不支持的 market_type: {market_type}，必须是 'contract' 或 'spot'")
     
-    async def _fetch_contract_symbols(self) -> List[Dict[str, Any]]:
+    async def _fetch_contract_symbols(self, co_type: int = 1) -> List[Dict[str, Any]]:
         """
         从合约 API 获取交易对列表
         
         API: https://api9528mystks.mystonks.org/api/v1/co/stock/product/page
+        
+        参数:
+            co_type: 合约类型，1=股票，3=加密货币，默认 1
+
         """
         try:
             # 使用 _request_api 方法调用合约产品列表 API（POST 请求）
@@ -467,7 +474,7 @@ class MsxExchange:
                 "search": "",
                 "favorite": 2,
                 "lang": "zh",
-                "coType": 1,
+                "coType": co_type,
             }
             res = await self._request_api("POST", api_path, json_body=payload)
 
@@ -1305,7 +1312,7 @@ class MsxExchange:
                 order_id = str(o.get("id") or o.get("orderId") or o.get("order_id") or "")
                 price = float(o.get("price", 0) or 0)
                 volume = float(o.get("vol", 0) or 0) or float(o.get("amount", 0) or 0)
-                open_type = (o.get("openType") or 1)
+                open_type = (o.get("openFlag") or 1)
                 long_flag = (o.get("longFlag") or 1)
                 order_type = (o.get("orderType") or 1)
                 status = str(o.get("status") or "0").lower()
@@ -1316,6 +1323,13 @@ class MsxExchange:
                 pnl = float(o.get("realPnl", 0) or o.get("pnl", 0) or 0)
                 fee = float(o.get("realFee", 0) or o.get("fee", 0) or 0)
                 amount=float(o.get("amtTotal", 0) or 0)
+                # 提取持仓ID（posId）
+                pos_id = None
+                if o.get("posId"):
+                    try:
+                        pos_id = int(o.get("posId"))
+                    except (TypeError, ValueError):
+                        pos_id = None
                 if open_type == 1 and long_flag == 1:
                     side = "buy"
                 elif open_type == 1 and long_flag == 2:
@@ -1346,6 +1360,8 @@ class MsxExchange:
                     pnl=pnl,
                     fee=fee,
                     open_type=open_type,
+                    posId=pos_id,
+                    raw=o,  # 保存原始数据以便后续提取信息
                 )
                 
                 if not symbol or sym == symbol:

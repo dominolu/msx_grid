@@ -1,0 +1,18 @@
+{
+  "pos_id": 1808368,
+  "symbol": "SOLUSDT",
+  "min_price": 120.0,
+  "max_price": 130.0,
+  "direction": "long",
+  "grid_spacing": 0.0026666666666666666,
+  "investment_amount": 100.0,
+  "leverage": 20.0,
+  "total_capital": 2000.0,
+  "asset_type": "stock",
+  "market_type": "contract",
+  "co_type": 3,
+  "start_price": 125.24,
+  "each_order_size": 0.5333333333333333,
+  "last_filled_time": 1766286216802,
+  "saved_at": "2025-12-21T13:46:35.769789"
+}

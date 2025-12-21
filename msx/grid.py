@@ -11,7 +11,7 @@
 # 版本号管理
 # 规则：每次修改代码时，将版本号最后一位数字增加1
 # 例如：1.0.1 -> 1.0.2, 1.0.9 -> 1.0.10, 1.9.9 -> 1.9.10
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 # from tkinter import NO  # 未使用的导入，已注释
 import asyncio
@@ -23,6 +23,10 @@ from .models import OrderInfo, Position
 from datetime import datetime, timedelta
 import requests
 from pytz import timezone
+import csv
+import os
+import json
+from pathlib import Path
 
 
 class GridStrategy:
@@ -102,6 +106,7 @@ class GridStrategy:
         }
         
         log.info("网格策略实例已创建（参数将在 start 方法中设置）")
+        asyncio.create_task(self.load_strategy())
     
     def _fetch_trading_status_from_api(self) -> Optional[Dict[str, Any]]:
         """
@@ -156,12 +161,20 @@ class GridStrategy:
         """
         判断当前是否在美股交易时段
         
+        注意：只有股票交易（co_type == 1）时才检查交易时段
+        加密货币（co_type == 3）或现货市场（co_type == None）始终返回 True，表示可以交易
+        
         使用API接口获取交易状态：https://api9528mystks.mystonks.org/api/v1/stock/isTrade
         使用缓存机制，在未超过startTradeTime之前不重复请求API
         
         Returns:
             bool: True 表示在交易时段内，False 表示不在交易时段
         """
+        # 只有股票交易（co_type == 1）时才检查交易时段
+        # 加密货币（co_type == 3）或现货市场（co_type == None）始终可以交易
+        if self.co_type != 1:
+            return True
+        
         try:
             current_time = int(datetime.now().timestamp())
             
@@ -252,7 +265,7 @@ class GridStrategy:
             log.info(f"等待认证成功...")
         
         await asyncio.sleep(10)
-        
+       
         # ========== 步骤1: 判断交易时段（统一判断，避免重复） ==========
         is_trading_hours = self.is_us_stock_trading_hours()
         if is_trading_hours:
@@ -288,18 +301,14 @@ class GridStrategy:
                 position_built = True
                 log.info("检测到已有持仓，跳过建仓操作")
             else:
-                # 没有持仓，需要建仓
-                if is_trading_hours:
-                    # 开市时，执行建仓
-                    log.info("开始执行初始建仓操作")
-                    await self._initial_build_position()
-                    position_built = True
-                    log.info("初始建仓完成")
-                else:
-                    # 休市时，跳过建仓，将在开市后自动建仓
-                    log.info("市场休市中，跳过初始建仓操作，将在开市后自动建仓")
-                    position_built = False
-            
+ 
+                log.info("开始执行初始建仓操作")
+                await self._initial_build_position()
+                position_built = True
+                log.info("初始建仓完成")
+                #持久化策略信息
+                await self._persist_strategy_info()
+                
             # ========== 步骤5: 计算每单持仓数量 ==========
             if self.total_capital is None or self.total_capital <= 0:
                 raise ValueError(f"总资金未正确初始化: {self.total_capital}")
@@ -330,17 +339,13 @@ class GridStrategy:
             
             # ========== 步骤7: 处理网格订单创建逻辑（使用步骤1判断的交易时段） ==========
             orders_created = False
-            if is_trading_hours:
-                # 开市时，创建网格订单
-                log.info("开始创建网格订单")
-                await self._place_grid_orders(self.current_price, self.each_order_size)
-                await asyncio.sleep(2)
-                orders_created = True
-                log.info("网格订单创建完成")
-            else:
-                # 休市时，跳过创建网格订单，将在开市后自动创建
-                log.info("市场休市中，跳过创建网格订单操作，将在开市后自动创建")
-                orders_created = False
+      
+            log.info("开始创建网格订单")
+            await self._place_grid_orders(self.current_price, self.each_order_size)
+            await asyncio.sleep(2)
+            orders_created = True
+            log.info("网格订单创建完成")
+        
             
             # ========== 步骤8: 统一设置初始化状态 ==========
             # 只有在建仓成功且创建网格订单成功时，才标记为已完成初始化
@@ -348,6 +353,7 @@ class GridStrategy:
             if position_built and orders_created:
                 self._initialized = True
                 log.info("初始化完成：建仓和创建网格订单均已完成")
+                await self._persist_strategy_info()
             else:
                 self._initialized = False
                 if not position_built and not orders_created:
@@ -417,7 +423,7 @@ class GridStrategy:
             log.error(traceback.format_exc())
         
         orders = await self.exchange.fetch_orders(self.symbol)
-        if not orders:
+        if  orders is None:
             log.error("获取订单失败")
             return
         
@@ -573,6 +579,17 @@ class GridStrategy:
 
         # 将成交记录转换为简化结构并缓存到 self.his_order
         for o in new_filled:
+            # 确定持仓ID：
+            # 1. 优先从当前持仓获取 pos_id
+            # 2. 如果持仓为空，则从平仓订单中获取 pos_id
+            pos_id = None
+            if self.position.id:  # 优先使用当前持仓ID
+                pos_id = self.position.id
+            elif o.open_type == 2 and o.posId:  # 持仓为空时，从平仓订单中获取
+                pos_id = o.posId
+            elif o.posId:  # 如果订单中包含posId，也使用
+                pos_id = o.posId
+            
             record = {
                 "order_id": getattr(o, "id", ""),
                 "symbol": getattr(o, "symbol", self.symbol),
@@ -585,14 +602,207 @@ class GridStrategy:
                 "fee": float(getattr(o, "fee", 0.0) or 0.0),
                 "timestamp": o.timestamp,
                 "status": o.status,
+                "pos_id": pos_id,  # 持仓ID
+                "avg_price": float(getattr(o, "avgPrice", 0.0) or 0.0),  # 成交均价
             }
             self.his_order.append(record)
+            
+            # 持久化到CSV文件
+            if pos_id:
+                self._persist_order_to_csv(record, pos_id)
+            else:
+                log.warning(f"订单 {record['order_id']} 无法确定持仓ID，跳过CSV持久化")
 
         # 更新 last_filled_time，避免重复处理
         max_ts = max(o["timestamp"] for o in self.his_order if o.get("timestamp"))
         self.last_filled_time = max(self.last_filled_time, max_ts)
 
-      
+    def _persist_order_to_csv(self, order_record: dict, pos_id: int) -> None:
+        """
+        将订单记录持久化到CSV文件
+        
+        参数：
+            order_record: 订单记录字典
+            pos_id: 持仓ID
+        
+        文件命名：{pos_id}_orders.csv
+        存储位置：项目根目录的 data/orders/ 目录
+        """
+        try:
+            # 确定存储目录
+            base_dir = Path(__file__).resolve().parent.parent
+            orders_dir = base_dir / "data" / "orders"
+            orders_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 确定文件名
+            filename = f"{pos_id}_orders.csv"
+            filepath = orders_dir / filename
+            
+            # CSV列名
+            fieldnames = [
+                "order_id", "symbol", "side", "open_type", "price", "volume",
+                "pnl", "fee", "timestamp", "status", "pos_id", "avg_price"
+            ]
+            
+            # 判断文件是否存在，决定是否写入表头
+            file_exists = filepath.exists()
+            
+            # 过滤 order_record，只保留 fieldnames 中定义的字段
+            filtered_record = {k: v for k, v in order_record.items() if k in fieldnames}
+            
+            # 追加写入CSV文件
+            with open(filepath, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                
+                # 如果文件不存在，写入表头
+                if not file_exists:
+                    writer.writeheader()
+                
+                # 写入订单记录（只包含 fieldnames 中定义的字段）
+                writer.writerow(filtered_record)
+            
+            log.debug(f"订单 {order_record['order_id']} 已持久化到 {filepath}")
+            
+        except Exception as e:
+            log.error(f"持久化订单到CSV失败: {e}")
+            log.error(traceback.format_exc())
+
+    async def _persist_strategy_info(self) -> None:
+        """
+        将策略参数持久化到JSON文件
+        
+        文件命名：{pos_id}.json
+        存储位置：项目根目录的 data/ 目录
+        """
+        try:
+            # 获取持仓ID
+            pos_id = None
+            if self.position and self.position.id:
+                pos_id = self.position.id
+            else:
+                # 尝试从持仓中获取
+                positions = await self.exchange.fetch_positions(self.symbol)
+                if positions and len(positions) > 0:
+                    pos = positions[0]
+                    if pos.id:
+                        pos_id = pos.id
+                        self.position.id = pos.id
+            
+            if not pos_id:
+                log.warning("无法获取持仓ID，跳过策略信息持久化")
+                return
+            
+            # 确定存储目录
+            base_dir = Path(__file__).resolve().parent.parent
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 确定文件名
+            filename = f"{pos_id}.json"
+            filepath = data_dir / filename
+            if not filepath.exists():
+                # 构建策略参数字典
+                strategy_info = {
+                    "pos_id": pos_id,
+                    "symbol": self.symbol,
+                    "min_price": self.min_price,
+                    "max_price": self.max_price,
+                    "direction": self.direction,
+                    "grid_spacing": self.grid_spacing,
+                    "investment_amount": self.investment_amount,
+                    "leverage": self.leverage,
+                    "total_capital": self.total_capital,
+                    "asset_type": self.asset_type,
+                    "market_type": self.market_type,
+                    "co_type": self.co_type,
+                    "start_price": self.start_price,
+                    "each_order_size": self.each_order_size,
+                    "last_filled_time": self.last_filled_time,
+                    "saved_at": datetime.now().isoformat(),
+                }
+                
+                # 写入JSON文件
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(strategy_info, f, indent=2, ensure_ascii=False)
+                
+                log.info(f"策略信息已持久化到 {filepath}")
+            
+        except Exception as e:
+            log.error(f"持久化策略信息失败: {e}")
+            log.error(traceback.format_exc())
+
+    async def load_strategy(self) -> None:
+        """
+        从持仓和策略文件中加载策略参数
+        
+        流程：
+        1. 获取所有持仓
+        2. 遍历持仓，从 data 目录中读取 {pos_id}.json 策略参数文件
+        3. 如果找到策略文件，返回策略参数字典（不调用 start，由调用者决定）
+        4. 如果没有策略文件或加载失败，返回 None
+        
+        Returns:
+            Optional[Dict[str, Any]]: 如果找到策略文件，返回策略参数字典；否则返回 None
+        """
+        try:
+            while not self.exchange.auth_status:
+                await asyncio.sleep(1)
+                log.info(f"等待认证成功...")
+            await asyncio.sleep(2)
+            # 获取所有持仓
+            positions = await self.exchange.fetch_positions()
+            
+            if not positions or len(positions) == 0:
+                log.info("未找到持仓，无法加载策略")
+                return None
+            
+            base_dir = Path(__file__).resolve().parent.parent
+            data_dir = base_dir / "data"
+            
+            # 遍历所有持仓，查找策略文件
+            for pos in positions:
+                if not pos.id:
+                    continue
+                
+                pos_id = pos.id
+                filepath = data_dir / f"{pos_id}.json"
+                
+                # 如果找到策略文件，读取并返回
+                if filepath.exists():
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            strategy_info = json.load(f)
+                        
+                        # 验证策略文件格式
+                        if not isinstance(strategy_info, dict):
+                            log.warning(f"策略文件格式错误: {filepath}")
+                            continue
+                        
+                        # 验证必需参数
+                        required_keys = ["symbol", "min_price", "max_price", "direction", 
+                                       "grid_spacing", "investment_amount", "leverage"]
+                        if not all(key in strategy_info for key in required_keys):
+                            log.warning(f"策略文件缺少必需参数: {filepath}")
+                            continue
+                        
+                        log.info(f"找到策略文件: {filepath}, pos_id: {pos_id}, symbol: {strategy_info.get('symbol')}")
+                        await self.start(strategy_info)
+                        return True
+                        
+                    except json.JSONDecodeError as e:
+                        log.error(f"策略文件JSON格式错误: {filepath}, {e}")
+                        continue
+                    except Exception as e:
+                        log.error(f"读取策略文件失败: {filepath}, {e}")
+                        continue
+            
+            log.info("未找到任何策略文件")
+            return None
+                
+        except Exception as e:
+            log.error(f"加载策略参数失败: {e}")
+            log.error(traceback.format_exc())
+            return None
 
     async def _place_grid_orders(self, filled_price: float, order_volume: float) -> None:
         """
@@ -787,6 +997,12 @@ class GridStrategy:
                 order_params["open_type"] = open_type
                 if self.co_type is not None:
                     order_params["co_type"] = self.co_type
+                # 合约下单时传递杠杆倍数
+                if self.leverage is not None:
+                    try:
+                        order_params["leverage"] = int(self.leverage)
+                    except (TypeError, ValueError):
+                        log.warning(f"{operation_name} 使用的杠杆倍数无效: {self.leverage}，将不传递 leverage 参数")
             
             # 平仓时需要传递 posId
             if open_type == 2 and self.position.id is not None:
@@ -968,18 +1184,32 @@ class GridStrategy:
             if self.investment_amount is None or self.investment_amount <= 0:
                 raise ValueError(f"投入资金未正确初始化: {self.investment_amount}")
             
-            # 根据资产类型和市场类型计算 co_type
-            # co_type: 1=股票合约, 3=币币合约
-            if asset_type == "stock" and market_type == "contract":
-                self.co_type = 1
-            elif asset_type == "crypto" and market_type == "contract":
-                self.co_type = 3
-            elif market_type == "spot":
-                # 现货市场，co_type 可能不需要或设为其他值
-                # 根据实际业务逻辑调整
-                self.co_type = None  # 现货可能不需要 co_type
+            # 设置 co_type：优先使用传入的参数，否则根据 asset_type 和 market_type 计算
+            # co_type: 1=股票合约, 3=加密货币合约
+            co_type_param = params.get("co_type")
+            if co_type_param is not None:
+                # 如果传入了 co_type 参数，验证并直接使用
+                try:
+                    co_type_value = int(co_type_param)
+                    if co_type_value not in [1, 3]:
+                        raise ValueError(f"co_type 参数无效，必须是 1（股票）或 3（加密货币），当前值: {co_type_value}")
+                    if market_type != "contract":
+                        raise ValueError("co_type 参数仅在合约市场有效")
+                    self.co_type = co_type_value
+                except (TypeError, ValueError) as e:
+                    raise ValueError(f"co_type 参数格式错误: {e}")
             else:
-                raise ValueError(f"不支持的资产类型和市场类型组合: asset_type={asset_type}, market_type={market_type}")
+                # 如果没有传入 co_type，根据 asset_type 和 market_type 计算
+                if asset_type == "stock" and market_type == "contract":
+                    self.co_type = 1
+                elif asset_type == "crypto" and market_type == "contract":
+                    self.co_type = 3
+                elif market_type == "spot":
+                    # 现货市场，co_type 可能不需要或设为其他值
+                    # 根据实际业务逻辑调整
+                    self.co_type = None  # 现货可能不需要 co_type
+                else:
+                    raise ValueError(f"不支持的资产类型和市场类型组合: asset_type={asset_type}, market_type={market_type}")
             
             # 更新统计信息
             self.stats["co_type"] = self.co_type
@@ -1012,19 +1242,41 @@ class GridStrategy:
             
             # 资金检查：验证账户可用余额是否足够
             # 注意：对于杠杆交易，用户只需要提供保证金（投资额），而不是总资金（投资额 × 杠杆）
+            # 先检查是否有持仓，将持仓对应的保证金也算作可用资金的一部分
             try:
                 account_info = await self.exchange.fetch_account()
                 free_balance = account_info.get("balance", 0.0)
+                
+                # 检查是否有相应持仓，并将持仓保证金计入可用余额
+                position_margin = 0.0
+                positions = await self.exchange.fetch_positions(self.symbol)
+                if positions and len(positions) > 0:
+                    for pos in positions:
+                        if pos.size > 0 and pos.raw:
+                            # 从原始数据中获取已用保证金（useMargin）或持仓保证金（posMargin）
+                            raw_data = pos.raw
+                            pos_margin = float(raw_data.get("posMargin", 0) or 0)
+                            # 优先使用 useMargin（已用保证金），如果没有则使用 posMargin（持仓保证金）
+                            position_margin += pos_margin
+                            log.info(f"检测到持仓：symbol={self.symbol}, size={pos.size}, 保证金={pos_margin:.2f}")
+                
+                # 可用资金 = 账户余额 + 持仓保证金
+                available_balance = free_balance + position_margin
                 # 所需资金 = 投资额（作为保证金）
                 required_amount = self.investment_amount
                 
-                if free_balance < required_amount:
+                if available_balance < required_amount:
+                    margin_info = f"，持仓保证金 ${position_margin:.2f}，" if position_margin > 0 else "，"
                     raise ValueError(
-                        f"账户余额不足：可用余额 ${free_balance:.2f}，"
+                        f"账户余额不足：可用余额 ${free_balance:.2f}{margin_info}"
+                        f"总可用资金 ${available_balance:.2f}，"
                         f"所需保证金 ${required_amount:.2f}（投资额 ${self.investment_amount:.2f}）"
                     )
                 
-                log.info(f"资金检查通过：可用余额 ${free_balance:.2f}，所需保证金 ${required_amount:.2f}，总资金 ${self.total_capital:.2f}（投资额 × 杠杆 {leverage}倍）")
+                margin_info = f"，持仓保证金 ${position_margin:.2f}，" if position_margin > 0 else "，"
+                log.info(f"资金检查通过：账户余额 ${free_balance:.2f}{margin_info}"
+                        f"总可用资金 ${available_balance:.2f}，所需保证金 ${required_amount:.2f}，"
+                        f"总资金 ${self.total_capital:.2f}（投资额 × 杠杆 {leverage}倍）")
             except ValueError:
                 # 重新抛出 ValueError，让上层处理
                 raise
@@ -1038,6 +1290,7 @@ class GridStrategy:
                     f"杠杆倍数={leverage}, 总资金={self.total_capital}, "
                     f"资产类型={asset_type}, 市场类型={market_type}, co_type={self.co_type}")
             
+           
             # 在调用 run() 之前就标记为已启动，避免重复启动
             self._status = True
             log.info(f"网格策略已启动: {self.symbol}")
@@ -1121,8 +1374,8 @@ class GridStrategy:
         - 这里的计算是一个「合理默认实现」，具体业务规则可以后续再细化。
         - self.his_order 中的每条记录结构参考 process_order_statistics 中的 record。
         """
-        # 使用 start() 函数中已计算好的总资金
-        total_investment = float(self.total_capital or 0.0)
+        # 投资额使用真实投入资金（不含杠杆放大）
+        total_investment = float(self.investment_amount or 0.0)
 
         # 已实现盈亏：如果 his_order 中有 pnl 字段，则累加；否则使用 stats["realized_pnl"]
         realized_pnl_from_orders = 0.0

@@ -5,14 +5,37 @@
 let currentStrategyStatus = null;
 let statusUpdateInterval = null;
 
+// 统一禁用原生 confirm 和 alert，防止旧代码或其他脚本弹出系统确认框
+// 所有确认操作改为使用自定义模态框 showConfirmModal
+// 所有提示操作改为使用自定义 Toast 组件
+window.confirm = function (message) {
+    console.warn('屏蔽原生 confirm 调用:', message);
+    return true;
+};
+
+window.alert = function (message) {
+    console.warn('屏蔽原生 alert 调用:', message);
+    showToast(message, 'info');
+};
+
 // DOM 元素（将在DOMContentLoaded中初始化）
 let gridConfigForm = null;
 let gridConfigModal = null;
 let closeConfigModal = null;
 let cancelConfigBtn = null;
+// 通用确认弹窗
+let confirmModal = null;
+let closeConfirmModal = null;
+let confirmTitleEl = null;
+let confirmMessageEl = null;
+let confirmOkBtn = null;
+let confirmCancelBtn = null;
+let pendingConfirmAction = null; // 当前等待确认的操作（函数）
 let startStrategyBtn = null;
 let stopStrategyBtn = null;
 let marketTypeSelect = null;
+let coTypeSelect = null;
+let coTypeField = null;
 let symbolInput = null;
 let symbolDatalist = null; // 已废弃，保留变量名避免报错
 let symbolDropdown = null;
@@ -55,20 +78,30 @@ let contractSymbolsCache = null; // [{ symbol, name, ... }]
 let spotSymbolsCache = null;     // [{ symbol, name }]
 
 // 从后端获取指定市场类型的交易对列表
-async function fetchSymbolsByMarketType(marketType) {
+async function fetchSymbolsByMarketType(marketType, coType) {
     if (!marketType) {
         marketType = 'contract';
     }
 
-    // 使用缓存避免重复请求
-    if (marketType === 'contract' && contractSymbolsCache) {
-        return contractSymbolsCache;
-    }
-    if (marketType === 'spot' && spotSymbolsCache) {
+    // 使用缓存避免重复请求（合约需要根据 coType 区分缓存）
+    if (marketType === 'contract') {
+        // 合约：根据 coType 区分缓存，默认使用 '1'
+        const effectiveCoType = coType || '1';
+        if (window[`contractSymbolsCache_${effectiveCoType}`]) {
+            return window[`contractSymbolsCache_${effectiveCoType}`];
+        }
+    } else if (marketType === 'spot' && spotSymbolsCache) {
         return spotSymbolsCache;
     }
 
-    const res = await fetch(`/api/symbols?market_type=${encodeURIComponent(marketType)}`);
+    // 构建 API URL
+    let apiUrl = `/api/symbols?market_type=${encodeURIComponent(marketType)}`;
+    // 合约市场：如果指定了 coType 则传递，否则后端会使用默认值 1
+    if (marketType === 'contract' && coType) {
+        apiUrl += `&co_type=${encodeURIComponent(coType)}`;
+    }
+
+    const res = await fetch(apiUrl);
     if (!res.ok) {
         throw new Error(`获取交易对列表失败: ${res.status}`);
     }
@@ -86,17 +119,15 @@ async function fetchSymbolsByMarketType(marketType) {
             name: item.name || '',
             leverTypes: item.leverTypes || '',
         }));
+        // 根据 coType 缓存（使用默认值 '1' 如果 coType 为空）
+        const effectiveCoType = coType || '1';
+        window[`contractSymbolsCache_${effectiveCoType}`] = list;
     } else {
         // 现货：只需要 symbol 和 name
         list = data.data.symbols.map((item) => ({
             symbol: item.symbol,
             name: item.name || '',
         }));
-    }
-
-    if (marketType === 'contract') {
-        contractSymbolsCache = list;
-    } else if (marketType === 'spot') {
         spotSymbolsCache = list;
     }
 
@@ -136,7 +167,8 @@ function populateSymbolDatalist(symbols) {
 async function loadSymbolsForCurrentMarket() {
     try {
         const marketType = marketTypeSelect ? marketTypeSelect.value : 'contract';
-        const allSymbols = await fetchSymbolsByMarketType(marketType || 'contract');
+        const coType = (marketType === 'contract' && coTypeSelect) ? coTypeSelect.value : null;
+        const allSymbols = await fetchSymbolsByMarketType(marketType || 'contract', coType);
 
         // 根据当前输入进行本地过滤（按 symbol 或 name 模糊匹配）
         let keyword = '';
@@ -226,7 +258,9 @@ async function updateLeverageBySymbol() {
     }
 
     try {
-        const symbols = await fetchSymbolsByMarketType('contract'); // 使用缓存
+        // 获取当前选择的 coType，确保从正确的缓存中获取交易对列表
+        const coType = (marketType === 'contract' && coTypeSelect) ? coTypeSelect.value : null;
+        const symbols = await fetchSymbolsByMarketType(marketType, coType);
         const meta = symbols.find((item) => (item.symbol || '').toUpperCase() === symbol);
         if (!meta || !meta.leverTypes) {
             setLeverageRange(1, 100);
@@ -279,9 +313,18 @@ function initDOMElements() {
     gridConfigModal = document.getElementById('gridConfigModal');
     closeConfigModal = document.getElementById('closeConfigModal');
     cancelConfigBtn = document.getElementById('cancelConfigBtn');
+    // 确认弹窗相关
+    confirmModal = document.getElementById('confirmModal');
+    closeConfirmModal = document.getElementById('closeConfirmModal');
+    confirmTitleEl = document.getElementById('confirmTitle');
+    confirmMessageEl = document.getElementById('confirmMessage');
+    confirmOkBtn = document.getElementById('confirmOkBtn');
+    confirmCancelBtn = document.getElementById('confirmCancelBtn');
     startStrategyBtn = document.getElementById('startStrategyBtn');
     stopStrategyBtn = document.getElementById('stopStrategyBtn');
     marketTypeSelect = document.getElementById('marketType');
+    coTypeSelect = document.getElementById('coType');
+    coTypeField = document.getElementById('coTypeField');
     symbolInput = document.getElementById('symbol');
     symbolDropdown = document.getElementById('symbolDropdown');
     leverageInput = document.getElementById('leverage');
@@ -324,6 +367,16 @@ function initDOMElements() {
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM内容已加载，开始初始化...');
     initDOMElements();
+    
+    // 初始化时根据市场类型显示/隐藏 coType 字段
+    if (marketTypeSelect && coTypeField) {
+        if (marketTypeSelect.value === 'contract') {
+            coTypeField.style.display = '';
+        } else {
+            coTypeField.style.display = 'none';
+        }
+    }
+    
     initEventListeners();
     loadStrategyStatus();
     // 每5秒更新一次状态
@@ -339,6 +392,133 @@ function closeConfigModalHandler() {
     if (gridConfigForm) {
         gridConfigForm.reset();
     }
+}
+
+// 打开通用确认弹窗
+function showConfirmModal({ title = '请确认操作', message = '确定要执行此操作吗？', onConfirm } = {}) {
+    if (!confirmModal) return;
+    if (confirmTitleEl) {
+        confirmTitleEl.textContent = title;
+    }
+    if (confirmMessageEl) {
+        confirmMessageEl.textContent = message;
+    }
+    pendingConfirmAction = typeof onConfirm === 'function' ? onConfirm : null;
+    confirmModal.classList.add('active');
+}
+
+// 关闭通用确认弹窗
+function closeConfirmModalHandler() {
+    if (!confirmModal) return;
+    confirmModal.classList.remove('active');
+    pendingConfirmAction = null;
+}
+
+// ==================== Toast 提示组件 ====================
+
+/**
+ * 显示 Toast 提示
+ * @param {string} message - 提示消息
+ * @param {string} type - 提示类型：'success', 'error', 'warning', 'info'
+ * @param {number} duration - 显示时长（毫秒），默认 3000，0 表示不自动关闭
+ */
+function showToast(message, type = 'info', duration = 3000) {
+    const container = document.getElementById('toastContainer');
+    if (!container) {
+        console.error('Toast 容器未找到');
+        return;
+    }
+
+    // 创建 Toast 元素
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+
+    // 图标 SVG
+    const iconSvg = getToastIcon(type);
+    const icon = document.createElement('div');
+    icon.className = 'toast-icon';
+    icon.innerHTML = iconSvg;
+
+    // 内容
+    const content = document.createElement('div');
+    content.className = 'toast-content';
+    content.textContent = message;
+
+    // 关闭按钮
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+    `;
+    closeBtn.addEventListener('click', () => {
+        removeToast(toast);
+    });
+
+    toast.appendChild(icon);
+    toast.appendChild(content);
+    toast.appendChild(closeBtn);
+    container.appendChild(toast);
+
+    // 自动关闭
+    if (duration > 0) {
+        setTimeout(() => {
+            removeToast(toast);
+        }, duration);
+    }
+
+    return toast;
+}
+
+/**
+ * 获取 Toast 图标 SVG
+ */
+function getToastIcon(type) {
+    const icons = {
+        success: `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="20 6 9 17 4 12"/>
+            </svg>
+        `,
+        error: `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+        `,
+        warning: `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+        `,
+        info: `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="16" x2="12" y2="12"/>
+                <line x1="12" y1="8" x2="12.01" y2="8"/>
+            </svg>
+        `
+    };
+    return icons[type] || icons.info;
+}
+
+/**
+ * 移除 Toast
+ */
+function removeToast(toast) {
+    if (!toast || !toast.parentNode) return;
+    
+    toast.classList.add('toast-exit');
+    setTimeout(() => {
+        if (toast.parentNode) {
+            toast.parentNode.removeChild(toast);
+        }
+    }, 300);
 }
 
 // 初始化事件监听器
@@ -394,6 +574,38 @@ function initEventListeners() {
             console.error('cancelConfigBtn 元素未找到或不是有效的DOM元素');
         }
 
+        // 确认弹窗按钮
+        if (closeConfirmModal && typeof closeConfirmModal.addEventListener === 'function') {
+            closeConfirmModal.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                closeConfirmModalHandler();
+            });
+        }
+        if (confirmCancelBtn && typeof confirmCancelBtn.addEventListener === 'function') {
+            confirmCancelBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                closeConfirmModalHandler();
+            });
+        }
+        if (confirmOkBtn && typeof confirmOkBtn.addEventListener === 'function') {
+            confirmOkBtn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const action = pendingConfirmAction;
+                // 先关闭弹窗，再执行动作，避免动作过程中的 UI 抖动影响弹窗
+                closeConfirmModalHandler();
+                if (typeof action === 'function') {
+                    try {
+                        await action();
+                    } catch (err) {
+                        console.error('确认操作执行失败:', err);
+                    }
+                }
+            });
+        }
+
         // 点击模态框外部关闭
         if (gridConfigModal && typeof gridConfigModal.addEventListener === 'function') {
             gridConfigModal.addEventListener('click', (e) => {
@@ -406,6 +618,14 @@ function initEventListeners() {
         // 市场类型切换时，重新加载对应市场的交易对列表
         if (marketTypeSelect && typeof marketTypeSelect.addEventListener === 'function') {
             marketTypeSelect.addEventListener('change', () => {
+                // 根据市场类型显示/隐藏 coType 字段
+                if (coTypeField) {
+                    if (marketTypeSelect.value === 'contract') {
+                        coTypeField.style.display = '';
+                    } else {
+                        coTypeField.style.display = 'none';
+                    }
+                }
                 loadSymbolsForCurrentMarket().catch((err) => {
                     console.error('加载交易对列表失败:', err);
                 });
@@ -413,6 +633,17 @@ function initEventListeners() {
                 updateLeverageBySymbol().catch((err) => {
                     console.error('更新杠杆倍数限制失败:', err);
                 });
+            });
+        }
+
+        // coType 切换时，重新加载交易对列表
+        if (coTypeSelect && typeof coTypeSelect.addEventListener === 'function') {
+            coTypeSelect.addEventListener('change', () => {
+                if (marketTypeSelect && marketTypeSelect.value === 'contract') {
+                    loadSymbolsForCurrentMarket().catch((err) => {
+                        console.error('加载交易对列表失败:', err);
+                    });
+                }
             });
         }
 
@@ -809,7 +1040,7 @@ function updateUIForNoStrategy() {
 // 处理启动策略
 async function handleStartStrategy() {
     if (!gridConfigForm) {
-        alert('配置表单未找到');
+        showToast('配置表单未找到', 'error');
         return;
     }
 
@@ -831,6 +1062,7 @@ async function handleStartStrategy() {
     const leverage = parseInt(formData.get('leverage'));
     const assetType = 'stock';  // 默认资产类型为 stock
     const marketType = formData.get('market_type') || 'contract';
+    const coType = formData.get('co_type');  // 获取 coType 参数
 
     // 验证参数
     if (!validateGridParams({
@@ -863,6 +1095,23 @@ async function handleStartStrategy() {
         market_type: marketType,
     };
 
+    // 如果是合约市场，添加 coType 参数
+    if (marketType === 'contract' && coType) {
+        params.co_type = parseInt(coType, 10);
+    }
+
+    // 弹出确认对话框，确认后再真正发起启动请求
+    showConfirmModal({
+        title: '确认启动策略',
+        message: `确定要启动 ${symbol} 的网格策略吗？`,
+        onConfirm: () => doStartStrategy(params),
+    });
+}
+
+// 实际执行启动策略请求的函数
+async function doStartStrategy(params) {
+    const { symbol } = params;
+
     // 启动请求发出前：启动按钮置灰并显示「启动中…」，停止按钮禁用，防止重复提交
     if (startStrategyBtn) {
         startStrategyBtn.disabled = true;
@@ -891,7 +1140,7 @@ async function handleStartStrategy() {
         if (!res.ok) {
             const errorData = await res.json().catch(() => null);
             const msg = errorData?.detail || `启动策略失败: ${res.status}`;
-            alert(msg);
+            showToast(msg, 'error');
             // 请求失败时恢复按钮到请求前的状态：启动可点，停止置灰
             if (startStrategyBtn) {
                 startStrategyBtn.disabled = false;
@@ -913,16 +1162,16 @@ async function handleStartStrategy() {
         const data = await res.json();
         console.log('策略启动成功:', data);
 
-        // 关闭模态框
+        // 关闭配置模态框
         closeConfigModalHandler();
 
         // 立即刷新状态
         await loadStrategyStatus();
 
-        alert('策略启动成功！');
+        showToast('策略启动成功！', 'success');
     } catch (error) {
         console.error('启动策略失败:', error);
-        alert('启动策略失败，请检查网络或后端服务。');
+        showToast('启动策略失败，请检查网络或后端服务。', 'error');
         // 异常时恢复按钮状态
         if (startStrategyBtn) {
             startStrategyBtn.disabled = false;
@@ -943,10 +1192,16 @@ async function handleStartStrategy() {
 
 // 处理停止策略
 async function handleStopStrategy() {
-    if (!confirm('确定要停止当前运行的策略吗？')) {
-        return;
-    }
+    // 使用自定义确认弹窗，而不是原生 confirm，避免闪烁问题
+    showConfirmModal({
+        title: '确认停止策略',
+        message: '确定要停止当前运行的策略吗？',
+        onConfirm: () => doStopStrategy(),
+    });
+}
 
+// 实际执行停止策略请求的函数
+async function doStopStrategy() {
     // 点击停止后：立刻置灰停止按钮并显示「停止中…」，同时禁止启动按钮，避免重复操作
     if (stopStrategyBtn) {
         stopStrategyBtn.disabled = true;
@@ -974,7 +1229,7 @@ async function handleStopStrategy() {
         if (!res.ok) {
             const errorData = await res.json().catch(() => null);
             const msg = errorData?.detail || `停止策略失败: ${res.status}`;
-            alert(msg);
+            showToast(msg, 'error');
             // 请求失败时恢复按钮：启动按钮恢复到停止前状态（取决于当前 running 状态），停止按钮可再次点击
             if (stopStrategyBtn) {
                 stopStrategyBtn.disabled = false;
@@ -1000,10 +1255,10 @@ async function handleStopStrategy() {
         // 立即刷新状态
         await loadStrategyStatus();
 
-        alert('策略已停止');
+        showToast('策略已停止', 'success');
     } catch (error) {
         console.error('停止策略失败:', error);
-        alert('停止策略失败，请检查网络或后端服务。');
+        showToast('停止策略失败，请检查网络或后端服务。', 'error');
         // 异常时恢复按钮：保留当前策略状态下的合理配置
         if (stopStrategyBtn) {
             stopStrategyBtn.disabled = false;
@@ -1061,37 +1316,37 @@ function resetButtonsAfterStatusLoad() {
 // 验证网格参数
 function validateGridParams(params) {
     if (!params.symbol || params.symbol.trim() === '') {
-        alert('请输入交易对');
+        showToast('请输入交易对', 'warning');
         return false;
     }
 
     if (params.min_price <= 0) {
-        alert('最低价格必须大于 0');
+        showToast('最低价格必须大于 0', 'warning');
         return false;
     }
 
     if (params.max_price <= 0) {
-        alert('最高价格必须大于 0');
+        showToast('最高价格必须大于 0', 'warning');
         return false;
     }
 
     if (params.max_price <= params.min_price) {
-        alert('最高价格必须大于最低价格');
+        showToast('最高价格必须大于最低价格', 'warning');
         return false;
     }
 
     if (params.grid_count < 2) {
-        alert('网格数量至少为 2');
+        showToast('网格数量至少为 2', 'warning');
         return false;
     }
 
     if (params.investment_amount <= 0) {
-        alert('投资额必须大于 0');
+        showToast('投资额必须大于 0', 'warning');
         return false;
     }
 
     if (params.leverage === undefined || params.leverage === null) {
-        alert('杠杆倍数不能为空');
+        showToast('杠杆倍数不能为空', 'warning');
         return false;
     }
 
@@ -1107,7 +1362,7 @@ function validateGridParams(params) {
     }
 
     if (params.leverage < minLev || params.leverage > maxLev) {
-        alert(`杠杆倍数必须在 ${minLev}-${maxLev} 之间`);
+        showToast(`杠杆倍数必须在 ${minLev}-${maxLev} 之间`, 'warning');
         return false;
     }
 

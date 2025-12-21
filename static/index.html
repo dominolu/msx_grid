@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MSX网格策略</title>
-    <link rel="stylesheet" href="/static/css/grid_management.css?v=1.0.5">
+    <link rel="stylesheet" href="/static/css/grid_management.css?v=1.0.6">
 </head>
 <body>
     <div class="dashboard-container">
@@ -236,6 +236,14 @@
                                             <option value="spot">现货 (Spot)</option>
                                         </select>
                                     </div>
+                                    <div class="form-field" id="coTypeField">
+                                        <label class="field-label">合约类型</label>
+                                        <select id="coType" name="co_type" class="field-input" required>
+                                            <option value="1">股票 (Stock)</option>
+                                            <option value="3">加密货币 (Crypto)</option>
+                                        </select>
+                                        <span class="field-hint">仅合约市场有效，现货市场忽略此选项</span>
+                                    </div>
                                     <div class="form-field field-with-dropdown">
                                         <label class="field-label">交易对</label>
                                         <input
@@ -325,9 +333,43 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Global Confirm Modal -->
+            <div class="modal-overlay" id="confirmModal">
+                <div class="modal-container modal-small">
+                    <div class="modal-header">
+                        <h3 class="modal-title" id="confirmTitle">请确认操作</h3>
+                        <button class="modal-close" id="closeConfirmModal">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="confirm-message" id="confirmMessage">确定要执行此操作吗？</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" id="confirmCancelBtn">取消</button>
+                        <button type="button" class="btn btn-primary" id="confirmOkBtn">确认</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Toast Container -->
+            <div class="toast-container" id="toastContainer"></div>
         </main>
+
+        <!-- Footer with version info -->
+        <footer class="dashboard-footer">
+            <div class="footer-content">
+                <span class="footer-text">MSX 网格策略前端版本</span>
+                <span class="footer-divider">|</span>
+                <span class="footer-meta">v1.0.6</span>
+            </div>
+        </footer>
     </div>
 
-    <script src="/static/js/grid_management.js?v=1.0.5"></script>
+    <script src="/static/js/grid_management.js?v=1.0.6"></script>
 </body>
 </html>

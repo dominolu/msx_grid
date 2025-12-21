@@ -241,11 +241,12 @@ async def get_free_balance() -> Dict[str, Any]:
 
 
 @app.get("/api/symbols")
-async def get_symbols(market_type: str = None) -> Dict[str, Any]:
+async def get_symbols(market_type: str = None, co_type: int = None) -> Dict[str, Any]:
     """获取交易对列表
     
     参数:
         market_type: 市场类型，可选值 "spot"（现货）或 "contract"（合约），不传则返回所有
+        co_type: 合约类型，1=股票，3=加密货币，仅合约市场有效，默认 None（使用默认值1）
     
     返回所有可用的交易对符号列表
     """
@@ -262,18 +263,32 @@ async def get_symbols(market_type: str = None) -> Dict[str, Any]:
                 detail=f"market_type 参数无效，必须是 'spot' 或 'contract'，当前值: {market_type}"
             )
         
+        # 验证 co_type 参数（仅合约市场有效）
+        if co_type is not None and market_type == "contract":
+            if co_type not in [1, 3]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"co_type 参数无效，必须是 1（股票）或 3（加密货币），当前值: {co_type}"
+                )
+        
         # 默认使用合约
         market_type = market_type or "contract"
         
         # 调用 exchange.get_symbols() 获取交易对（现在是异步方法）
-        symbols = await exchange.get_symbols(market_type=market_type)
+        # 如果是合约市场，传递 co_type 参数（如果未指定则使用默认值 1）
+        if market_type == "contract":
+            # co_type 为 None 时，exchange.get_symbols 会使用默认值 1
+            symbols = await exchange.get_symbols(market_type=market_type, co_type=co_type)
+        else:
+            symbols = await exchange.get_symbols(market_type=market_type)
         
         return {
             "status": "success",
             "data": {
                 "symbols": symbols,
                 "count": len(symbols),
-                "market_type": market_type or "all"
+                "market_type": market_type or "all",
+                "co_type": co_type if market_type == "contract" else None
             }
         }
     except HTTPException:
