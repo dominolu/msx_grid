@@ -4,9 +4,11 @@ app.build/
 app.dist/
 app.onefile-build/
 app.bin
-
+data/
 # 日志
 logs/
 
 msx/__pycache__/exchange.cpython-310.pyc
 msx/__pycache__/grid.cpython-310.pyc
+data/orders/
+
